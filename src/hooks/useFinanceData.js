@@ -1,0 +1,410 @@
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../contexts/AuthContext';
+
+// Stałe
+const GUEST_STORAGE_KEY = 'financeflow-guest-data';
+export const CURRENT_YEAR = 2026;
+export const MONTHS = [
+  'Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec',
+  'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'
+];
+export const MONTHS_SHORT = ['Sty', 'Lut', 'Mar', 'Kwi', 'Maj', 'Cze', 'Lip', 'Sie', 'Wrz', 'Paź', 'Lis', 'Gru'];
+
+// Funkcje pomocnicze
+export const getCurrentMonth = () => new Date().getMonth();
+export const getCurrentDay = () => new Date().getDate();
+export const getDaysRemainingInMonth = () => {
+  const today = new Date();
+  const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  return lastDay.getDate() - today.getDate() + 1;
+};
+export const getTotalDaysInMonth = (month, year) => new Date(year, month + 1, 0).getDate();
+
+const createEmptyMonthData = () => ({ incomes: [], expenses: [] });
+
+const createInitialData = () => {
+  const data = { months: {}, savingsGoal: { type: 'none', monthlyAmount: 0, yearlyAmount: 0, targetMonth: 11 } };
+  for (let month = 0; month < 12; month++) {
+    data.months[month] = createEmptyMonthData();
+  }
+  return data;
+};
+
+export const useFinanceData = () => {
+  const { user, isGuest } = useAuth();
+  const [data, setData] = useState(createInitialData());
+  const [selectedMonth, setSelectedMonth] = useState(getCurrentMonth());
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  // Pobierz dane - z Supabase lub localStorage
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        if (isGuest) {
+          // Tryb gościa - użyj localStorage
+          const saved = localStorage.getItem(GUEST_STORAGE_KEY);
+          if (saved) {
+            setData(JSON.parse(saved));
+          } else {
+            setData(createInitialData());
+          }
+        } else {
+          // Zalogowany użytkownik - użyj Supabase
+          const { data: userData, error } = await supabase
+            .from('user_finance_data')
+            .select('data')
+            .eq('user_id', user.id)
+            .single();
+
+          if (error && error.code !== 'PGRST116') {
+            console.error('Error fetching data:', error);
+          }
+
+          if (userData?.data) {
+            setData(userData.data);
+          } else {
+            const initialData = createInitialData();
+            await supabase.from('user_finance_data').insert({
+              user_id: user.id,
+              data: initialData
+            });
+            setData(initialData);
+          }
+        }
+      } catch (err) {
+        console.error('Error:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, [user, isGuest]);
+
+  // Zapisz dane - do Supabase lub localStorage
+  const saveData = useCallback(async (newData) => {
+    if (!user) return;
+    setSaving(true);
+    try {
+      if (isGuest) {
+        // Tryb gościa - zapisz do localStorage
+        localStorage.setItem(GUEST_STORAGE_KEY, JSON.stringify(newData));
+      } else {
+        // Zalogowany użytkownik - zapisz do Supabase
+        const { error } = await supabase
+          .from('user_finance_data')
+          .upsert({
+            user_id: user.id,
+            data: newData,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'user_id' });
+
+        if (error) console.error('Error saving data:', error);
+      }
+    } catch (err) {
+      console.error('Error:', err);
+    } finally {
+      setSaving(false);
+    }
+  }, [user, isGuest]);
+
+  // Funkcja pomocnicza do aktualizacji danych
+  const updateData = useCallback((updater) => {
+    setData(prev => {
+      const newData = updater(prev);
+      saveData(newData);
+      return newData;
+    });
+  }, [saveData]);
+
+  // ============ CRUD DLA PRZYCHODÓW ============
+  const addIncome = (name, amount) => {
+    updateData(prev => ({
+      ...prev,
+      months: {
+        ...prev.months,
+        [selectedMonth]: {
+          ...prev.months[selectedMonth],
+          incomes: [...prev.months[selectedMonth].incomes, { id: Date.now(), name, amount: parseFloat(amount) }]
+        }
+      }
+    }));
+  };
+
+  const updateIncome = (id, name, amount) => {
+    updateData(prev => ({
+      ...prev,
+      months: {
+        ...prev.months,
+        [selectedMonth]: {
+          ...prev.months[selectedMonth],
+          incomes: prev.months[selectedMonth].incomes.map(inc =>
+            inc.id === id ? { ...inc, name, amount: parseFloat(amount) } : inc
+          )
+        }
+      }
+    }));
+  };
+
+  const deleteIncome = (id) => {
+    updateData(prev => ({
+      ...prev,
+      months: {
+        ...prev.months,
+        [selectedMonth]: {
+          ...prev.months[selectedMonth],
+          incomes: prev.months[selectedMonth].incomes.filter(inc => inc.id !== id)
+        }
+      }
+    }));
+  };
+
+  // ============ CRUD DLA WYDATKÓW ============
+  const addExpense = (name, amount, date, isFixed = false) => {
+    updateData(prev => ({
+      ...prev,
+      months: {
+        ...prev.months,
+        [selectedMonth]: {
+          ...prev.months[selectedMonth],
+          expenses: [...prev.months[selectedMonth].expenses, { id: Date.now(), name, amount: parseFloat(amount), date, isFixed }]
+        }
+      }
+    }));
+  };
+
+  const updateExpense = (id, name, amount, date, isFixed) => {
+    updateData(prev => ({
+      ...prev,
+      months: {
+        ...prev.months,
+        [selectedMonth]: {
+          ...prev.months[selectedMonth],
+          expenses: prev.months[selectedMonth].expenses.map(exp =>
+            exp.id === id ? { ...exp, name, amount: parseFloat(amount), date, isFixed } : exp
+          )
+        }
+      }
+    }));
+  };
+
+  const deleteExpense = (id) => {
+    updateData(prev => ({
+      ...prev,
+      months: {
+        ...prev.months,
+        [selectedMonth]: {
+          ...prev.months[selectedMonth],
+          expenses: prev.months[selectedMonth].expenses.filter(exp => exp.id !== id)
+        }
+      }
+    }));
+  };
+
+  // ============ CEL OSZCZĘDNOŚCIOWY ============
+  const updateSavingsGoal = (goalData) => {
+    updateData(prev => ({
+      ...prev,
+      savingsGoal: { ...prev.savingsGoal, ...goalData }
+    }));
+  };
+
+  const clearAllData = () => {
+    if (confirm('Czy na pewno chcesz usunąć wszystkie dane?')) {
+      const initialData = createInitialData();
+      setData(initialData);
+      saveData(initialData);
+    }
+  };
+
+  // ============ OBLICZENIA ============
+  const currentMonthData = data.months[selectedMonth] || createEmptyMonthData();
+
+  const totalIncome = useMemo(() =>
+    currentMonthData.incomes.reduce((sum, inc) => sum + inc.amount, 0),
+    [currentMonthData.incomes]
+  );
+
+  const fixedExpenses = useMemo(() =>
+    currentMonthData.expenses.filter(exp => exp.isFixed).reduce((sum, exp) => sum + exp.amount, 0),
+    [currentMonthData.expenses]
+  );
+
+  const variableExpenses = useMemo(() =>
+    currentMonthData.expenses.filter(exp => !exp.isFixed).reduce((sum, exp) => sum + exp.amount, 0),
+    [currentMonthData.expenses]
+  );
+
+  const totalExpenses = useMemo(() => fixedExpenses + variableExpenses, [fixedExpenses, variableExpenses]);
+  const balance = useMemo(() => totalIncome - totalExpenses, [totalIncome, totalExpenses]);
+
+  // ============ CEL OSZCZĘDNOŚCIOWY - OBLICZENIA ============
+  const savingsGoalData = useMemo(() => {
+    const goal = data.savingsGoal;
+    const currentMonth = getCurrentMonth();
+    
+    if (goal.type === 'none') {
+      return { type: 'none', targetAmount: 0, monthlyTarget: 0, currentSavings: 0, remaining: 0, progress: 0, onTrack: true, monthsLeft: 0 };
+    }
+
+    let currentSavings = 0;
+    for (let i = 0; i <= currentMonth; i++) {
+      const monthData = data.months[i] || createEmptyMonthData();
+      const income = monthData.incomes.reduce((s, inc) => s + inc.amount, 0);
+      const expenses = monthData.expenses.reduce((s, exp) => s + exp.amount, 0);
+      currentSavings += (income - expenses);
+    }
+
+    if (goal.type === 'monthly') {
+      const targetAmount = goal.monthlyAmount;
+      const thisMonthSavings = balance;
+      const remaining = Math.max(0, targetAmount - thisMonthSavings);
+      const progress = targetAmount > 0 ? Math.min(100, (thisMonthSavings / targetAmount) * 100) : 0;
+      return { type: 'monthly', targetAmount, monthlyTarget: targetAmount, currentSavings: thisMonthSavings, remaining, progress, onTrack: thisMonthSavings >= targetAmount, monthsLeft: 1 };
+    }
+
+    if (goal.type === 'yearly') {
+      const targetAmount = goal.yearlyAmount;
+      const targetMonth = goal.targetMonth;
+      const monthsLeft = Math.max(1, targetMonth - currentMonth + 1);
+      const remaining = Math.max(0, targetAmount - currentSavings);
+      const monthlyTarget = remaining / monthsLeft;
+      const progress = targetAmount > 0 ? Math.min(100, (currentSavings / targetAmount) * 100) : 0;
+      return { type: 'yearly', targetAmount, monthlyTarget, currentSavings, remaining, progress, onTrack: currentSavings >= (targetAmount * (currentMonth + 1) / (targetMonth + 1)), monthsLeft, targetMonth };
+    }
+
+    return { type: 'none', targetAmount: 0, monthlyTarget: 0, currentSavings: 0, remaining: 0, progress: 0, onTrack: true, monthsLeft: 0 };
+  }, [data, balance]);
+
+  // ============ GUILT-FREE BURN TRACKER ============
+  const guiltFreeBurn = useMemo(() => {
+    const currentMonth = getCurrentMonth();
+    const daysRemaining = getDaysRemainingInMonth();
+    const currentDay = getCurrentDay();
+    const totalDays = getTotalDaysInMonth(currentMonth, CURRENT_YEAR);
+
+    const monthData = data.months[currentMonth] || createEmptyMonthData();
+    const monthIncome = monthData.incomes.reduce((sum, inc) => sum + inc.amount, 0);
+    const monthFixedExpenses = monthData.expenses.filter(e => e.isFixed).reduce((sum, exp) => sum + exp.amount, 0);
+    const monthVariableExpenses = monthData.expenses.filter(e => !e.isFixed).reduce((sum, exp) => sum + exp.amount, 0);
+
+    const availableAfterFixed = monthIncome - monthFixedExpenses;
+    const remainingAfterVariable = availableAfterFixed - monthVariableExpenses;
+    const monthlyTarget = savingsGoalData.type !== 'none' ? savingsGoalData.monthlyTarget : 0;
+    const guiltFreeFunds = remainingAfterVariable - monthlyTarget;
+    const dailyLimit = daysRemaining > 0 ? guiltFreeFunds / daysRemaining : 0;
+
+    const idealDailyBudget = (availableAfterFixed - monthlyTarget) / totalDays;
+    const idealSpentByNow = idealDailyBudget * (currentDay - 1);
+    const spendingStatus = monthVariableExpenses <= idealSpentByNow ? 'under' : 'over';
+    const spendingDiff = Math.abs(monthVariableExpenses - idealSpentByNow);
+
+    const monthProgress = (currentDay / totalDays) * 100;
+    const budgetForVariable = availableAfterFixed - monthlyTarget;
+    const budgetUsed = budgetForVariable > 0 ? (monthVariableExpenses / budgetForVariable) * 100 : 0;
+
+    return {
+      dailyLimit: Math.max(0, dailyLimit), guiltFreeFunds, remainingAfterVariable, daysRemaining, currentDay, totalDays,
+      monthIncome, monthFixedExpenses, monthVariableExpenses, availableAfterFixed, monthlyTarget,
+      spendingStatus, spendingDiff, monthProgress, budgetUsed, budgetForVariable,
+      hasData: monthIncome > 0, hasGoal: savingsGoalData.type !== 'none'
+    };
+  }, [data, savingsGoalData]);
+
+  // ============ PODSUMOWANIE ROCZNE ============
+  const yearlySummary = useMemo(() => {
+    let income = 0, fixedExp = 0, variableExp = 0;
+    Object.values(data.months).forEach(monthData => {
+      income += monthData.incomes.reduce((sum, inc) => sum + inc.amount, 0);
+      fixedExp += monthData.expenses.filter(e => e.isFixed).reduce((sum, exp) => sum + exp.amount, 0);
+      variableExp += monthData.expenses.filter(e => !e.isFixed).reduce((sum, exp) => sum + exp.amount, 0);
+    });
+    return { income, expenses: fixedExp + variableExp, fixedExpenses: fixedExp, variableExpenses: variableExp, balance: income - fixedExp - variableExp };
+  }, [data]);
+
+  // ============ PODSUMOWANIA MIESIĘCZNE ============
+  const monthlySummaries = useMemo(() => {
+    return MONTHS.map((name, index) => {
+      const monthData = data.months[index] || createEmptyMonthData();
+      const income = monthData.incomes.reduce((sum, inc) => sum + inc.amount, 0);
+      const fixed = monthData.expenses.filter(e => e.isFixed).reduce((sum, exp) => sum + exp.amount, 0);
+      const variable = monthData.expenses.filter(e => !e.isFixed).reduce((sum, exp) => sum + exp.amount, 0);
+      return { name: name.substring(0, 3), income, expenses: fixed + variable, fixedExpenses: fixed, variableExpenses: variable, balance: income - fixed - variable };
+    });
+  }, [data]);
+
+  // ============ FINANCIAL RUNWAY ============
+  const financialRunway = useMemo(() => {
+    const currentMonth = getCurrentMonth();
+    let totalSavings = 0, totalExpensesSum = 0, monthsWithExpenses = 0;
+
+    for (let i = 0; i <= currentMonth; i++) {
+      const monthData = data.months[i] || createEmptyMonthData();
+      const income = monthData.incomes.reduce((sum, inc) => sum + inc.amount, 0);
+      const expenses = monthData.expenses.reduce((sum, exp) => sum + exp.amount, 0);
+      totalSavings += (income - expenses);
+      if (expenses > 0) { totalExpensesSum += expenses; monthsWithExpenses++; }
+    }
+
+    const avgMonthlyExpenses = monthsWithExpenses > 0 ? totalExpensesSum / monthsWithExpenses : 0;
+    const months = avgMonthlyExpenses > 0 ? totalSavings / avgMonthlyExpenses : 0;
+    return { totalSavings, avgMonthlyExpenses, months: Math.max(0, months), hasData: monthsWithExpenses > 0 };
+  }, [data]);
+
+  // ============ FORECAST DATA ============
+  const forecastData = useMemo(() => {
+    const currentMonth = getCurrentMonth();
+    let totalIncomeSum = 0, totalExpensesSum = 0, monthsWithData = 0;
+
+    for (let i = 0; i <= currentMonth; i++) {
+      const monthData = data.months[i] || createEmptyMonthData();
+      const income = monthData.incomes.reduce((sum, inc) => sum + inc.amount, 0);
+      const expenses = monthData.expenses.reduce((sum, exp) => sum + exp.amount, 0);
+      if (income > 0 || expenses > 0) { totalIncomeSum += income; totalExpensesSum += expenses; monthsWithData++; }
+    }
+
+    const avgIncome = monthsWithData > 0 ? totalIncomeSum / monthsWithData : 0;
+    const avgExpenses = monthsWithData > 0 ? totalExpensesSum / monthsWithData : 0;
+    const avgBalance = avgIncome - avgExpenses;
+
+    let cumulativeBalance = 0, forecastStartBalance = 0;
+    const chartData = [];
+
+    for (let i = 0; i < 12; i++) {
+      const monthData = data.months[i] || createEmptyMonthData();
+      const income = monthData.incomes.reduce((sum, inc) => sum + inc.amount, 0);
+      const expenses = monthData.expenses.reduce((sum, exp) => sum + exp.amount, 0);
+      const isCurrentOrPast = i <= currentMonth;
+      const hasRealData = income > 0 || expenses > 0;
+
+      if (isCurrentOrPast && hasRealData) {
+        cumulativeBalance += (income - expenses);
+        forecastStartBalance = cumulativeBalance;
+        chartData.push({ name: MONTHS_SHORT[i], month: i, balance: cumulativeBalance, forecast: null, income, expenses, isReal: true });
+      } else if (isCurrentOrPast) {
+        chartData.push({ name: MONTHS_SHORT[i], month: i, balance: cumulativeBalance, forecast: null, income: 0, expenses: 0, isReal: true });
+      } else {
+        forecastStartBalance += avgBalance;
+        chartData.push({ name: MONTHS_SHORT[i], month: i, balance: null, forecast: forecastStartBalance, income: avgIncome, expenses: avgExpenses, isReal: false });
+      }
+    }
+
+    if (currentMonth < 11 && chartData[currentMonth] && chartData[currentMonth + 1]) {
+      chartData[currentMonth].forecast = chartData[currentMonth].balance;
+    }
+
+    return { chartData, avgIncome, avgExpenses, avgBalance, hasData: monthsWithData > 0 };
+  }, [data]);
+
+  return {
+    data, selectedMonth, setSelectedMonth, currentMonthData, totalIncome, totalExpenses, fixedExpenses, variableExpenses, balance,
+    yearlySummary, monthlySummaries, addIncome, updateIncome, deleteIncome, addExpense, updateExpense, deleteExpense, clearAllData,
+    financialRunway, forecastData, guiltFreeBurn, savingsGoal: data.savingsGoal, savingsGoalData, updateSavingsGoal,
+    MONTHS, MONTHS_SHORT, CURRENT_YEAR, getCurrentMonth, loading, saving
+  };
+};
